@@ -25,9 +25,13 @@ struct Relay {
   bool on;               // current state
 };
 
+// REWIRE REQUIRED: Device2 moved from GPIO5 to GPIO23. GPIO5 is an ESP32
+// strapping pin -- it is sampled at reset and emits a PWM burst at boot, so a
+// relay module loading or pulling it down can stop the board booting. GPIO23
+// has no strapping or boot-glitch behaviour.
 Relay relays[] = {
   { 4,  "relay/device1", 0, false },
-  { 5,  "relay/device2", 1, false },
+  { 23, "relay/device2", 1, false },
   { 18, "relay/device3", 2, false },
   { 19, "relay/device4", 3, false },
   { 21, "relay/device5", 4, false },
