@@ -357,8 +357,10 @@ void setup() {
   buildClientId();
   Serial.printf("MQTT client ID: %s\n", clientId);
 
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
+  // The SSID is deliberately not logged -- anyone with a serial console (or a
+  // USB cable and thirty seconds) should not get a free read of the network
+  // this board is joined to.
+  Serial.println("Starting Wi-Fi association...");
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
   lastWifiAttempt = millis();
