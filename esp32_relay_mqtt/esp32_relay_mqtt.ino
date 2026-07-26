@@ -16,6 +16,13 @@ const char* mqttPassword = "";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+// MQTT client ID. A broker permits one connection per client ID and evicts the
+// existing session when a second client presents the same one, so a shared
+// literal like "ESP32Client" lets a second board -- or anyone who can reach the
+// broker -- kick this device off at will. Derived from the factory MAC, which
+// is unique per device and stable across reboots and reflashes.
+char clientId[24];
+
 // One entry per relay channel. Every topic string lives in this table and
 // nowhere else, so the MQTT contract has a single source of truth.
 struct Relay {
@@ -52,6 +59,16 @@ Preferences prefs;
 // is rejected outright rather than truncated (truncating "onwards" to "on"
 // would actuate a relay the sender never asked for).
 const size_t MAX_PAYLOAD = 16;
+
+// NOTE: every function definition must stay below the type definitions above.
+// The Arduino preprocessor auto-generates prototypes and injects them ahead of
+// the first function in the file, so a function defined before `struct Relay`
+// makes the generated `applyRelay(const Relay&)` prototype fail to compile.
+void buildClientId() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(clientId, sizeof(clientId), "esp32-relay-%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
 
 // Drive the relay hardware to match r.on. Relay modules are active LOW.
 void applyRelay(const Relay& r) {
@@ -170,6 +187,10 @@ void setup() {
   }
 
   // Connect to Wi-Fi
+  WiFi.mode(WIFI_STA);
+  buildClientId();
+  Serial.printf("MQTT client ID: %s\n", clientId);
+
   Serial.print("Connecting to ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
@@ -187,8 +208,8 @@ void setup() {
   client.setCallback(callback);
 
   while (!client.connected()) {
-    Serial.println("Connecting to MQTT...");
-    if (client.connect("ESP32Client", mqttUser, mqttPassword)) {
+    Serial.printf("Connecting to MQTT as %s ...\n", clientId);
+    if (client.connect(clientId, mqttUser, mqttPassword)) {
       Serial.println("connected");
     } else {
       Serial.print("failed with state ");
