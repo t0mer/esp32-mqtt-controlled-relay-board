@@ -70,8 +70,13 @@ const unsigned long RECONNECT_AUTH_MS = 60000;
 // Detect a dead link reasonably fast and keep NAT mappings alive.
 const uint16_t MQTT_KEEPALIVE_S = 45;
 
+// How often to re-issue a Wi-Fi association attempt while disconnected.
+const unsigned long WIFI_RETRY_MS = 10000;
+
 unsigned long lastConnectAttempt = 0;
 unsigned long reconnectDelayMs = RECONNECT_MIN_MS;
+unsigned long lastWifiAttempt = 0;
+bool wifiWasConnected = false;
 
 // NOTE: every function definition must stay below the type definitions above.
 // The Arduino preprocessor auto-generates prototypes and injects them ahead of
@@ -168,6 +173,34 @@ void callback(char* topic, byte* message, unsigned int length) {
   Serial.printf("No relay bound to topic %s\n", topic);
 }
 
+// Non-blocking Wi-Fi maintenance. setup() used to spin in a while loop with no
+// timeout, so a board powered on while the AP was down never reached loop() at
+// all and stayed inert until the network happened to come back.
+bool ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiWasConnected) {
+      wifiWasConnected = true;
+      Serial.print("WiFi connected. IP address: ");
+      Serial.println(WiFi.localIP());
+    }
+    return true;
+  }
+
+  if (wifiWasConnected) {
+    wifiWasConnected = false;
+    Serial.println("WiFi connection lost.");
+  }
+
+  unsigned long now = millis();
+  if (now - lastWifiAttempt >= WIFI_RETRY_MS) {
+    lastWifiAttempt = now;
+    Serial.println("WiFi not connected; retrying association...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+  }
+  return false;
+}
+
 // Turn PubSubClient's state() code into something greppable in a serial log.
 // "it randomly disconnects" is a 30-second diagnosis with this line present.
 const char* mqttStateName(int state) {
@@ -256,37 +289,24 @@ void setup() {
 
   Serial.print("Connecting to ");
   Serial.println(ssid);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  lastWifiAttempt = millis();
 
-  // Connect to MQTT Broker
+  // Configure the MQTT client. Connecting is left to loop() so that an
+  // unreachable AP or broker at power-on can never stall startup.
   client.setServer(mqttServer, mqttPort);
   client.setCallback(callback);
   client.setKeepAlive(MQTT_KEEPALIVE_S);
-
-  while (!client.connected()) {
-    Serial.printf("Connecting to MQTT as %s ...\n", clientId);
-    if (client.connect(clientId, mqttUser, mqttPassword)) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed with state ");
-      Serial.print(client.state());
-      delay(2000);
-    }
-  }
-
-  // Subscribe to topics
-  subscribeAll();
 }
 
 void loop() {
+  // Relays hold their restored state while offline; nothing here actuates.
+  if (!ensureWifi()) {
+    delay(10);  // yield to the scheduler instead of spinning on the retry timer
+    return;
+  }
+
   // Re-establish the broker session after a drop. Without this the board went
   // deaf permanently on the first blip -- relays frozen in their last state
   // until someone power-cycled it.
@@ -296,6 +316,7 @@ void loop() {
       lastConnectAttempt = now;
       mqttConnect();
     }
+    delay(10);  // yield to the scheduler while waiting out the backoff
     return;
   }
 
