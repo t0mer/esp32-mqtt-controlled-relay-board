@@ -73,10 +73,20 @@ const uint16_t MQTT_KEEPALIVE_S = 45;
 // How often to re-issue a Wi-Fi association attempt while disconnected.
 const unsigned long WIFI_RETRY_MS = 10000;
 
+// Commands are events, not state: a retained command republished by the broker
+// on every (re)subscribe would re-actuate relays on each reconnect. PubSubClient
+// does not expose the retain flag to the callback, but retained messages are
+// delivered immediately after SUBSCRIBE, so inbound commands are ignored for a
+// short settling window. The authoritative boot state comes from NVS instead.
+// Trade-off: a command published within this window of a reconnect is dropped.
+const unsigned long RETAINED_SETTLE_MS = 1500;
+
 unsigned long lastConnectAttempt = 0;
 unsigned long reconnectDelayMs = RECONNECT_MIN_MS;
 unsigned long lastWifiAttempt = 0;
 bool wifiWasConnected = false;
+unsigned long subscribedAt = 0;
+bool settling = false;
 
 // NOTE: every function definition must stay below the type definitions above.
 // The Arduino preprocessor auto-generates prototypes and injects them ahead of
@@ -140,6 +150,15 @@ bool parseOnOff(const char* s, bool& out) {
 
 // Callback function for MQTT subscription
 void callback(char* topic, byte* message, unsigned int length) {
+  // Drop the retained backlog the broker replays right after SUBSCRIBE.
+  if (settling) {
+    if (millis() - subscribedAt < RETAINED_SETTLE_MS) {
+      Serial.printf("Ignoring replayed retained message on %s\n", topic);
+      return;
+    }
+    settling = false;
+  }
+
   // An empty payload is how brokers and tools clear a retained topic (MQTT
   // Explorer's "delete topic", history clearing). It is never a command.
   if (length == 0) {
@@ -224,6 +243,9 @@ void subscribeAll() {
   for (size_t i = 0; i < RELAY_COUNT; i++) {
     client.subscribe(relays[i].cmdTopic);
   }
+  // Open the window during which replayed retained commands are ignored.
+  subscribedAt = millis();
+  settling = true;
 }
 
 // One connection attempt. Returns true on success. Never blocks longer than
