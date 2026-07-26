@@ -98,9 +98,15 @@ void setup() {
     EEPROM.begin(eepromSize);
   }
 
-  // Initialize the GPIO pins for the devices as outputs
+  // Park every relay OFF *before* the pad becomes an output. pinMode(OUTPUT)
+  // drives the reset-default LOW, and these modules are active LOW, so doing
+  // this in the other order pulses all six loads on at every boot, brownout
+  // and watchdog reset. Writing the output register first means the pin drives
+  // HIGH the instant it is enabled.
   for (size_t i = 0; i < RELAY_COUNT; i++) {
+    digitalWrite(relays[i].pin, HIGH);
     pinMode(relays[i].pin, OUTPUT);
+    digitalWrite(relays[i].pin, HIGH);
   }
 
   // Load saved states from EEPROM
