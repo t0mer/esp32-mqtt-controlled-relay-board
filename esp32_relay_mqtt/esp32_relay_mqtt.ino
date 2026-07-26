@@ -258,13 +258,20 @@ const char* mqttStateName(int state) {
 }
 
 // Subscriptions do not survive a reconnect, so this runs on every connect.
-void subscribeAll() {
+bool subscribeAll() {
+  bool ok = true;
   for (size_t i = 0; i < RELAY_COUNT; i++) {
-    client.subscribe(relays[i].cmdTopic);
+    // QoS 1 for commands. A failed SUBSCRIBE used to pass silently, leaving
+    // the board connected and apparently healthy while ignoring every command.
+    if (!client.subscribe(relays[i].cmdTopic, 1)) {
+      Serial.printf("SUBSCRIBE FAILED for %s\n", relays[i].cmdTopic);
+      ok = false;
+    }
   }
   // Open the window during which replayed retained commands are ignored.
   subscribedAt = millis();
   settling = true;
+  return ok;
 }
 
 // One connection attempt. Returns true on success. Never blocks longer than
@@ -289,14 +296,24 @@ bool mqttConnect() {
   }
 
   Serial.println("MQTT connected");
+
+  // Subscribe before announcing liveness: a session that cannot receive
+  // commands must not advertise itself as up. A clean disconnect does not
+  // fire the Last Will, so status would otherwise be stuck at "1".
+  if (!subscribeAll()) {
+    Serial.println("Dropping session because a subscription failed.");
+    client.disconnect();
+    unsigned long next = reconnectDelayMs * 2;
+    reconnectDelayMs = next > RECONNECT_MAX_MS ? RECONNECT_MAX_MS : next;
+    return false;
+  }
+
   reconnectDelayMs = RECONNECT_MIN_MS;
 
   // Re-announce liveness and the full relay snapshot on every connect, not
   // just the first, so subscribers resync after any drop.
   client.publish(STATUS_TOPIC, "1", true);
   client.publish(VERSION_TOPIC, FW_VERSION, true);
-
-  subscribeAll();
 
   for (size_t i = 0; i < RELAY_COUNT; i++) {
     publishState(relays[i]);
