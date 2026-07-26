@@ -1,6 +1,16 @@
+// Transport security. Set to 1 once your broker has TLS configured. The port
+// follows this toggle automatically (1883 <-> 8883), which avoids the classic
+// "TLS enabled but still pointed at the cleartext port" failure. Plain MQTT
+// sends the broker username and password, and every relay command, in the
+// clear -- readable and injectable by anyone on the path.
+#define MQTT_USE_TLS 0
+
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <Preferences.h>
+#if MQTT_USE_TLS
+#include <WiFiClientSecure.h>
+#endif
 
 // Replace with your network credentials
 const char* ssid = "";  // Network SSID (name)
@@ -8,12 +18,37 @@ const char* password = "";  // Network password
 
 // MQTT Broker details
 const char* mqttServer = "";
-const int mqttPort = 1883;
 const char* mqttUser = "";
 const char* mqttPassword = "";
 
+#if MQTT_USE_TLS
+const int mqttPort = 8883;
+
+// The broker is verified against this certificate -- there is no unverified
+// fallback, so a MITM cannot impersonate your broker. Paste the CA that signed
+// the broker's certificate (for a self-signed broker, its own certificate).
+static const char MQTT_CA_CERT[] = R"EOF(
+-----BEGIN CERTIFICATE-----
+PASTE YOUR BROKER CA CERTIFICATE HERE
+-----END CERTIFICATE-----
+)EOF";
+
+// Delete this line once a real certificate is pasted above.
+#define MQTT_CA_CERT_IS_PLACEHOLDER 1
+
+#ifdef MQTT_CA_CERT_IS_PLACEHOLDER
+#error "MQTT_USE_TLS is 1: paste your broker's CA certificate into MQTT_CA_CERT, then delete the MQTT_CA_CERT_IS_PLACEHOLDER line."
+#endif
+#else
+const int mqttPort = 1883;
+#endif
+
 // Initialize the WiFi and MQTT client objects
+#if MQTT_USE_TLS
+WiFiClientSecure espClient;
+#else
 WiFiClient espClient;
+#endif
 PubSubClient client(espClient);
 
 // MQTT client ID. A broker permits one connection per client ID and evicts the
@@ -367,6 +402,13 @@ void setup() {
 
   // Configure the MQTT client. Connecting is left to loop() so that an
   // unreachable AP or broker at power-on can never stall startup.
+#if MQTT_USE_TLS
+  espClient.setCACert(MQTT_CA_CERT);
+  Serial.println("MQTT transport: TLS, broker certificate verified");
+#else
+  Serial.println("MQTT transport: PLAINTEXT -- credentials and commands are");
+  Serial.println("readable on the network. Set MQTT_USE_TLS to 1 when able.");
+#endif
   client.setServer(mqttServer, mqttPort);
   client.setCallback(callback);
   client.setKeepAlive(MQTT_KEEPALIVE_S);
