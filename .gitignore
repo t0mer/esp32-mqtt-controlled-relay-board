@@ -1,0 +1,38 @@
+# Claude / AI assistant context — local only, never track
+CLAUDE.md
+.claude/
+.cursor/
+.aider*
+
+# Design / implementation / planning docs — local only
+/docs/
+docs/*
+*.design.md
+*.implementation.md
+
+# Local credentials — keep real SSID / broker passwords out of git
+secrets.h
+arduino_secrets.h
+.env
+.env.*
+!.env.example
+
+# Arduino / PlatformIO build output
+build/
+/dist/
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+*.hex
+*.map
+
+# Security scan reports
+scans/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
