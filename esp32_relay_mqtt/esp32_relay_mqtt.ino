@@ -16,21 +16,24 @@ const char* mqttPassword = "";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Variables to store the current state of each device (ON/OFF)
-String Device1State = "off";
-String Device2State = "off";
-String Device3State = "off";
-String Device4State = "off";
-String Device5State = "off";
-String Device6State = "off";
+// One entry per relay channel. Every topic string lives in this table and
+// nowhere else, so the MQTT contract has a single source of truth.
+struct Relay {
+  uint8_t pin;           // GPIO driving the relay (active LOW)
+  const char* cmdTopic;  // topic this channel listens on
+  int eepromAddr;        // byte offset of the persisted state
+  bool on;               // current state
+};
 
-// Assign each device to a GPIO pin
-const int Device1 = 4;
-const int Device2 = 5;
-const int Device3 = 18;
-const int Device4 = 19;
-const int Device5 = 21;
-const int Device6 = 22;
+Relay relays[] = {
+  { 4,  "relay/device1", 0, false },
+  { 5,  "relay/device2", 1, false },
+  { 18, "relay/device3", 2, false },
+  { 19, "relay/device4", 3, false },
+  { 21, "relay/device5", 4, false },
+  { 22, "relay/device6", 5, false },
+};
+const size_t RELAY_COUNT = sizeof(relays) / sizeof(relays[0]);
 
 // Variable to enable or disable state saving
 const bool saveState = true;
@@ -38,93 +41,48 @@ const bool saveState = true;
 // EEPROM address to store the state
 const int eepromSize = 6;
 
+// Longest command payload we accept ("off" + NUL, rounded up). Payloads are
+// copied into a fixed stack buffer so no heap allocation happens per message.
+const size_t MAX_PAYLOAD = 8;
+
+// Drive the relay hardware to match r.on. Relay modules are active LOW.
+void applyRelay(const Relay& r) {
+  digitalWrite(r.pin, r.on ? LOW : HIGH);
+}
+
 // Callback function for MQTT subscription
 void callback(char* topic, byte* message, unsigned int length) {
-  String messageTemp;
-  
-  for (int i = 0; i < length; i++) {
-    messageTemp += (char)message[i];
-  }
+  char payload[MAX_PAYLOAD];
+  size_t n = length < (MAX_PAYLOAD - 1) ? length : (MAX_PAYLOAD - 1);
+  memcpy(payload, message, n);
+  payload[n] = '\0';
 
   // Print the message for debugging
   Serial.print("Message arrived on topic: ");
   Serial.print(topic);
   Serial.print(". Message: ");
-  Serial.println(messageTemp);
+  Serial.println(payload);
 
-  // Check the received message and update the corresponding relay state
-  if (String(topic) == "relay/device1") {
-    if (messageTemp == "on") {
-      Serial.println("Device 1 on");
-      Device1State = "on";
-      digitalWrite(Device1, LOW);
-      if (saveState) EEPROM.write(0, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 1 off");
-      Device1State = "off";
-      digitalWrite(Device1, HIGH);
-      if (saveState) EEPROM.write(0, 0);
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    Relay& r = relays[i];
+    if (strcmp(topic, r.cmdTopic) != 0) {
+      continue;
     }
-  } else if (String(topic) == "relay/device2") {
-    if (messageTemp == "on") {
-      Serial.println("Device 2 on");
-      Device2State = "on";
-      digitalWrite(Device2, LOW);
-      if (saveState) EEPROM.write(1, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 2 off");
-      Device2State = "off";
-      digitalWrite(Device2, HIGH);
-      if (saveState) EEPROM.write(1, 0);
+
+    if (strcmp(payload, "on") == 0) {
+      r.on = true;
+    } else if (strcmp(payload, "off") == 0) {
+      r.on = false;
+    } else {
+      break;
     }
-  } else if (String(topic) == "relay/device3") {
-    if (messageTemp == "on") {
-      Serial.println("Device 3 on");
-      Device3State = "on";
-      digitalWrite(Device3, LOW);
-      if (saveState) EEPROM.write(2, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 3 off");
-      Device3State = "off";
-      digitalWrite(Device3, HIGH);
-      if (saveState) EEPROM.write(2, 0);
+
+    Serial.printf("%s -> %s\n", r.cmdTopic, r.on ? "on" : "off");
+    applyRelay(r);
+    if (saveState) {
+      EEPROM.write(r.eepromAddr, r.on ? 1 : 0);
     }
-  } else if (String(topic) == "relay/device4") {
-    if (messageTemp == "on") {
-      Serial.println("Device 4 on");
-      Device4State = "on";
-      digitalWrite(Device4, LOW);
-      if (saveState) EEPROM.write(3, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 4 off");
-      Device4State = "off";
-      digitalWrite(Device4, HIGH);
-      if (saveState) EEPROM.write(3, 0);
-    }
-  } else if (String(topic) == "relay/device5") {
-    if (messageTemp == "on") {
-      Serial.println("Device 5 on");
-      Device5State = "on";
-      digitalWrite(Device5, LOW);
-      if (saveState) EEPROM.write(4, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 5 off");
-      Device5State = "off";
-      digitalWrite(Device5, HIGH);
-      if (saveState) EEPROM.write(4, 0);
-    }
-  } else if (String(topic) == "relay/device6") {
-    if (messageTemp == "on") {
-      Serial.println("Device 6 on");
-      Device6State = "on";
-      digitalWrite(Device6, LOW);
-      if (saveState) EEPROM.write(5, 1);
-    } else if (messageTemp == "off") {
-      Serial.println("Device 6 off");
-      Device6State = "off";
-      digitalWrite(Device6, HIGH);
-      if (saveState) EEPROM.write(5, 0);
-    }
+    break;
   }
 
   if (saveState) {
@@ -134,37 +92,28 @@ void callback(char* topic, byte* message, unsigned int length) {
 
 void setup() {
   Serial.begin(115200);
-  
+
   // Initialize EEPROM
   if (saveState) {
     EEPROM.begin(eepromSize);
   }
 
-  // Initialize the GPIO pins for the devices as outputs and set them to HIGH (NC state)
-  pinMode(Device1, OUTPUT);
-  pinMode(Device2, OUTPUT);
-  pinMode(Device3, OUTPUT);
-  pinMode(Device4, OUTPUT);
-  pinMode(Device5, OUTPUT);
-  pinMode(Device6, OUTPUT);
-  
+  // Initialize the GPIO pins for the devices as outputs
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    pinMode(relays[i].pin, OUTPUT);
+  }
+
   // Load saved states from EEPROM
   if (saveState) {
-    Device1State = EEPROM.read(0) == 1 ? "on" : "off";
-    Device2State = EEPROM.read(1) == 1 ? "on" : "off";
-    Device3State = EEPROM.read(2) == 1 ? "on" : "off";
-    Device4State = EEPROM.read(3) == 1 ? "on" : "off";
-    Device5State = EEPROM.read(4) == 1 ? "on" : "off";
-    Device6State = EEPROM.read(5) == 1 ? "on" : "off";
+    for (size_t i = 0; i < RELAY_COUNT; i++) {
+      relays[i].on = (EEPROM.read(relays[i].eepromAddr) == 1);
+    }
   }
 
   // Set initial relay states
-  digitalWrite(Device1, Device1State == "on" ? LOW : HIGH);
-  digitalWrite(Device2, Device2State == "on" ? LOW : HIGH);
-  digitalWrite(Device3, Device3State == "on" ? LOW : HIGH);
-  digitalWrite(Device4, Device4State == "on" ? LOW : HIGH);
-  digitalWrite(Device5, Device5State == "on" ? LOW : HIGH);
-  digitalWrite(Device6, Device6State == "on" ? LOW : HIGH);
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    applyRelay(relays[i]);
+  }
 
   // Connect to Wi-Fi
   Serial.print("Connecting to ");
@@ -195,12 +144,9 @@ void setup() {
   }
 
   // Subscribe to topics
-  client.subscribe("relay/device1");
-  client.subscribe("relay/device2");
-  client.subscribe("relay/device3");
-  client.subscribe("relay/device4");
-  client.subscribe("relay/device5");
-  client.subscribe("relay/device6");
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    client.subscribe(relays[i].cmdTopic);
+  }
 }
 
 void loop() {
