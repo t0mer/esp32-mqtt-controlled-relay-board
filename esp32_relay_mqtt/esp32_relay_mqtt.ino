@@ -60,6 +60,19 @@ Preferences prefs;
 // would actuate a relay the sender never asked for).
 const size_t MAX_PAYLOAD = 16;
 
+// Reconnect backoff: start at 1s and cap at 20s so a reconnect never feels
+// stuck. An auth rejection backs off much further -- retrying bad credentials
+// every second is pointless and keeps fail2ban-style broker lockouts alive.
+const unsigned long RECONNECT_MIN_MS = 1000;
+const unsigned long RECONNECT_MAX_MS = 20000;
+const unsigned long RECONNECT_AUTH_MS = 60000;
+
+// Detect a dead link reasonably fast and keep NAT mappings alive.
+const uint16_t MQTT_KEEPALIVE_S = 45;
+
+unsigned long lastConnectAttempt = 0;
+unsigned long reconnectDelayMs = RECONNECT_MIN_MS;
+
 // NOTE: every function definition must stay below the type definitions above.
 // The Arduino preprocessor auto-generates prototypes and injects them ahead of
 // the first function in the file, so a function defined before `struct Relay`
@@ -155,6 +168,56 @@ void callback(char* topic, byte* message, unsigned int length) {
   Serial.printf("No relay bound to topic %s\n", topic);
 }
 
+// Turn PubSubClient's state() code into something greppable in a serial log.
+// "it randomly disconnects" is a 30-second diagnosis with this line present.
+const char* mqttStateName(int state) {
+  switch (state) {
+    case MQTT_CONNECTION_TIMEOUT:      return "connection timeout";
+    case MQTT_CONNECTION_LOST:         return "connection lost";
+    case MQTT_CONNECT_FAILED:          return "TCP connect failed";
+    case MQTT_DISCONNECTED:            return "disconnected";
+    case MQTT_CONNECTED:               return "connected";
+    case MQTT_CONNECT_BAD_PROTOCOL:    return "broker rejected protocol version";
+    case MQTT_CONNECT_BAD_CLIENT_ID:   return "broker rejected client ID";
+    case MQTT_CONNECT_UNAVAILABLE:     return "broker unavailable";
+    case MQTT_CONNECT_BAD_CREDENTIALS: return "bad username or password";
+    case MQTT_CONNECT_UNAUTHORIZED:    return "not authorized";
+    default:                           return "unknown";
+  }
+}
+
+// Subscriptions do not survive a reconnect, so this runs on every connect.
+void subscribeAll() {
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    client.subscribe(relays[i].cmdTopic);
+  }
+}
+
+// One connection attempt. Returns true on success. Never blocks longer than
+// the underlying socket timeout, so it is safe to call from loop().
+bool mqttConnect() {
+  Serial.printf("Connecting to MQTT as %s ...\n", clientId);
+
+  if (!client.connect(clientId, mqttUser, mqttPassword)) {
+    int st = client.state();
+    Serial.printf("MQTT connect failed: state %d (%s)\n", st, mqttStateName(st));
+
+    if (st == MQTT_CONNECT_BAD_CREDENTIALS || st == MQTT_CONNECT_UNAUTHORIZED) {
+      Serial.println("Not authorized -- check credentials. Retrying slowly.");
+      reconnectDelayMs = RECONNECT_AUTH_MS;
+    } else {
+      unsigned long next = reconnectDelayMs * 2;
+      reconnectDelayMs = next > RECONNECT_MAX_MS ? RECONNECT_MAX_MS : next;
+    }
+    return false;
+  }
+
+  Serial.println("MQTT connected");
+  reconnectDelayMs = RECONNECT_MIN_MS;
+  subscribeAll();
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -206,6 +269,7 @@ void setup() {
   // Connect to MQTT Broker
   client.setServer(mqttServer, mqttPort);
   client.setCallback(callback);
+  client.setKeepAlive(MQTT_KEEPALIVE_S);
 
   while (!client.connected()) {
     Serial.printf("Connecting to MQTT as %s ...\n", clientId);
@@ -219,11 +283,21 @@ void setup() {
   }
 
   // Subscribe to topics
-  for (size_t i = 0; i < RELAY_COUNT; i++) {
-    client.subscribe(relays[i].cmdTopic);
-  }
+  subscribeAll();
 }
 
 void loop() {
+  // Re-establish the broker session after a drop. Without this the board went
+  // deaf permanently on the first blip -- relays frozen in their last state
+  // until someone power-cycled it.
+  if (!client.connected()) {
+    unsigned long now = millis();
+    if (now - lastConnectAttempt >= reconnectDelayMs) {
+      lastConnectAttempt = now;
+      mqttConnect();
+    }
+    return;
+  }
+
   client.loop();
 }
