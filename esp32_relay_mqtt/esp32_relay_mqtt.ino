@@ -47,9 +47,11 @@ const bool saveState = true;
 // replaces (whose commit() erased a full 4 KB sector unconditionally).
 Preferences prefs;
 
-// Longest command payload we accept ("off" + NUL, rounded up). Payloads are
-// copied into a fixed stack buffer so no heap allocation happens per message.
-const size_t MAX_PAYLOAD = 8;
+// Longest command payload we accept. Payloads are copied into a fixed stack
+// buffer so no heap allocation happens per message; anything longer than this
+// is rejected outright rather than truncated (truncating "onwards" to "on"
+// would actuate a relay the sender never asked for).
+const size_t MAX_PAYLOAD = 16;
 
 // Drive the relay hardware to match r.on. Relay modules are active LOW.
 void applyRelay(const Relay& r) {
@@ -72,32 +74,68 @@ void setRelay(Relay& r, bool on) {
   }
 }
 
+// Strip leading and trailing whitespace in place.
+char* trimWhitespace(char* s) {
+  while (*s != '\0' && isspace((unsigned char)*s)) {
+    s++;
+  }
+  char* end = s + strlen(s);
+  while (end > s && isspace((unsigned char)end[-1])) {
+    end--;
+  }
+  *end = '\0';
+  return s;
+}
+
+// Parse a command payload into a boolean. Accepts on/off, 1/0 and true/false
+// in any case. Returns false when the payload is not a recognised command so
+// the caller can reject it -- an unparsed payload must never fall through to a
+// default that actuates a relay.
+bool parseOnOff(const char* s, bool& out) {
+  if (strcasecmp(s, "on") == 0 || strcmp(s, "1") == 0 || strcasecmp(s, "true") == 0) {
+    out = true;
+    return true;
+  }
+  if (strcasecmp(s, "off") == 0 || strcmp(s, "0") == 0 || strcasecmp(s, "false") == 0) {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 // Callback function for MQTT subscription
 void callback(char* topic, byte* message, unsigned int length) {
-  char payload[MAX_PAYLOAD];
-  size_t n = length < (MAX_PAYLOAD - 1) ? length : (MAX_PAYLOAD - 1);
-  memcpy(payload, message, n);
-  payload[n] = '\0';
+  // An empty payload is how brokers and tools clear a retained topic (MQTT
+  // Explorer's "delete topic", history clearing). It is never a command.
+  if (length == 0) {
+    Serial.printf("Ignoring empty payload on %s\n", topic);
+    return;
+  }
 
-  // Print the message for debugging
-  Serial.print("Message arrived on topic: ");
-  Serial.print(topic);
-  Serial.print(". Message: ");
-  Serial.println(payload);
+  if (length >= MAX_PAYLOAD) {
+    Serial.printf("Ignoring oversized payload (%u bytes) on %s\n", length, topic);
+    return;
+  }
+
+  char raw[MAX_PAYLOAD];
+  memcpy(raw, message, length);
+  raw[length] = '\0';
+  char* payload = trimWhitespace(raw);
+
+  bool desired;
+  if (!parseOnOff(payload, desired)) {
+    Serial.printf("Ignoring unrecognised command '%s' on %s\n", payload, topic);
+    return;
+  }
 
   for (size_t i = 0; i < RELAY_COUNT; i++) {
-    Relay& r = relays[i];
-    if (strcmp(topic, r.cmdTopic) != 0) {
-      continue;
+    if (strcmp(topic, relays[i].cmdTopic) == 0) {
+      setRelay(relays[i], desired);
+      return;
     }
-
-    if (strcmp(payload, "on") == 0) {
-      setRelay(r, true);
-    } else if (strcmp(payload, "off") == 0) {
-      setRelay(r, false);
-    }
-    break;
   }
+
+  Serial.printf("No relay bound to topic %s\n", topic);
 }
 
 void setup() {
