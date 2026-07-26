@@ -23,13 +23,22 @@ PubSubClient client(espClient);
 // is unique per device and stable across reboots and reflashes.
 char clientId[24];
 
+#define FW_VERSION "2026.7.0"
+
+// Liveness topics. status is the Last Will payload as well: the broker
+// publishes "0" retained if this board drops off without a clean disconnect,
+// so subscribers can tell "off" from "not there".
+const char* STATUS_TOPIC = "relay/status";
+const char* VERSION_TOPIC = "relay/version";
+
 // One entry per relay channel. Every topic string lives in this table and
 // nowhere else, so the MQTT contract has a single source of truth.
 struct Relay {
-  uint8_t pin;           // GPIO driving the relay (active LOW)
-  const char* cmdTopic;  // topic this channel listens on
-  const char* nvsKey;    // Preferences key holding the persisted state
-  bool on;               // current state
+  uint8_t pin;             // GPIO driving the relay (active LOW)
+  const char* cmdTopic;    // topic this channel listens on
+  const char* stateTopic;  // topic this channel reports its state on
+  const char* nvsKey;      // Preferences key holding the persisted state
+  bool on;                 // current state
 };
 
 // REWIRE REQUIRED: Device2 moved from GPIO5 to GPIO23. GPIO5 is an ESP32
@@ -37,12 +46,12 @@ struct Relay {
 // relay module loading or pulling it down can stop the board booting. GPIO23
 // has no strapping or boot-glitch behaviour.
 Relay relays[] = {
-  { 4,  "relay/device1", "d1", false },
-  { 23, "relay/device2", "d2", false },
-  { 18, "relay/device3", "d3", false },
-  { 19, "relay/device4", "d4", false },
-  { 21, "relay/device5", "d5", false },
-  { 22, "relay/device6", "d6", false },
+  { 4,  "relay/device1", "relay/device1/state", "d1", false },
+  { 23, "relay/device2", "relay/device2/state", "d2", false },
+  { 18, "relay/device3", "relay/device3/state", "d3", false },
+  { 19, "relay/device4", "relay/device4/state", "d4", false },
+  { 21, "relay/device5", "relay/device5/state", "d5", false },
+  { 22, "relay/device6", "relay/device6/state", "d6", false },
 };
 const size_t RELAY_COUNT = sizeof(relays) / sizeof(relays[0]);
 
@@ -103,6 +112,15 @@ void applyRelay(const Relay& r) {
   digitalWrite(r.pin, r.on ? LOW : HIGH);
 }
 
+// Report a relay's state, retained so a subscriber learns it on connect
+// instead of waiting for the next change. PubSubClient publishes at QoS 0
+// only; the LWT below is the one publish that carries QoS 1.
+void publishState(const Relay& r) {
+  if (client.connected()) {
+    client.publish(r.stateTopic, r.on ? "on" : "off", true);
+  }
+}
+
 // Apply a new state to a relay, persisting it only when it actually changed.
 // The previous code wrote and committed on every inbound message -- one full
 // flash sector erase each -- so a chatty publisher (or a hostile one) could
@@ -117,6 +135,7 @@ void setRelay(Relay& r, bool on) {
   if (saveState) {
     prefs.putBool(r.nvsKey, on);
   }
+  publishState(r);
 }
 
 // Strip leading and trailing whitespace in place.
@@ -253,7 +272,9 @@ void subscribeAll() {
 bool mqttConnect() {
   Serial.printf("Connecting to MQTT as %s ...\n", clientId);
 
-  if (!client.connect(clientId, mqttUser, mqttPassword)) {
+  // Register the Last Will so an ungraceful drop is visible to subscribers.
+  if (!client.connect(clientId, mqttUser, mqttPassword,
+                      STATUS_TOPIC, 1, true, "0")) {
     int st = client.state();
     Serial.printf("MQTT connect failed: state %d (%s)\n", st, mqttStateName(st));
 
@@ -269,7 +290,17 @@ bool mqttConnect() {
 
   Serial.println("MQTT connected");
   reconnectDelayMs = RECONNECT_MIN_MS;
+
+  // Re-announce liveness and the full relay snapshot on every connect, not
+  // just the first, so subscribers resync after any drop.
+  client.publish(STATUS_TOPIC, "1", true);
+  client.publish(VERSION_TOPIC, FW_VERSION, true);
+
   subscribeAll();
+
+  for (size_t i = 0; i < RELAY_COUNT; i++) {
+    publishState(relays[i]);
+  }
   return true;
 }
 
