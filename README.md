@@ -8,6 +8,40 @@ Built for always-on use: it never blocks at startup, reconnects on its own after
 a network or broker outage, and does not write to flash unless a relay actually
 changed.
 
+## Contents
+
+- [Features](#features)
+- [Hardware](#hardware)
+- [MQTT interface](#mqtt-interface)
+- [Configuration](#configuration)
+- [Connection behaviour](#connection-behaviour)
+- [State persistence](#state-persistence)
+- [Building and flashing](#building-and-flashing)
+- [Usage](#usage)
+- [Home Assistant](#home-assistant)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Features
+
+- Six independently switched relay channels, one MQTT command topic each.
+- Tolerant command parsing (`on`/`off`, `1`/`0`, `true`/`false`, any case) with
+  strict rejection of empty, oversized and unrecognised payloads.
+- Retained `on`/`off` state per channel, plus retained `relay/status`
+  (online/offline via Last Will) and `relay/version` topics.
+- Relay states persisted in NVS and restored at boot; flash is written only on
+  an actual state change.
+- Relays parked OFF before their pins become outputs, so the sketch never pulses
+  the loads on at boot.
+- Non-blocking startup, automatic Wi-Fi reconnection (every 10 s) and MQTT
+  reconnection with exponential backoff and a longer backoff after
+  authentication failures.
+- Unique per-board MQTT client ID derived from the MAC address.
+- Optional TLS with mandatory broker certificate verification.
+
 ---
 
 ## Hardware
@@ -166,12 +200,15 @@ hours.
 
 ## Building and flashing
 
-Requires the `esp32` board package and the **PubSubClient** library
-(`Preferences` ships with the ESP32 core). Verified against esp32 core 3.3.11
-and PubSubClient 2.8.
+Requires the `esp32` board package by Espressif and the
+[**PubSubClient**](https://github.com/knolleary/pubsubclient) library by Nick
+O'Leary (`WiFi`, `WiFiClientSecure` and `Preferences` ship with the ESP32 core).
+Verified against esp32 core 3.3.11 and PubSubClient 2.8.
 
-With the Arduino IDE: install the ESP32 boards package, add PubSubClient via
-Library Manager, open `esp32_relay_mqtt/esp32_relay_mqtt.ino`, select your ESP32
+With the Arduino IDE: add
+`https://espressif.github.io/arduino-esp32/package_esp32_index.json` to
+*Additional boards manager URLs*, install the **esp32** boards package, add
+**PubSubClient** via Library Manager, open `esp32_relay_mqtt/esp32_relay_mqtt.ino`, select your ESP32
 board and upload.
 
 With `arduino-cli`:
@@ -203,6 +240,37 @@ mosquitto_sub -h broker.local -u user -P pass -t 'relay/#' -v
 
 ---
 
+## Home Assistant
+
+The topics and payloads map directly onto Home Assistant's
+[MQTT switch](https://www.home-assistant.io/integrations/switch.mqtt/). One
+entry per channel, shown here for Device 1:
+
+```yaml
+mqtt:
+  switch:
+    - name: "Relay 1"
+      unique_id: esp32_relay_device1
+      command_topic: "relay/device1"
+      state_topic: "relay/device1/state"
+      payload_on: "on"
+      payload_off: "off"
+      availability_topic: "relay/status"
+      payload_available: "1"
+      payload_not_available: "0"
+      qos: 1
+      retain: false
+```
+
+Repeat for `device2` … `device6`, changing `name`, `unique_id` and both topics.
+Leave `retain` off: a retained command would be replayed on every reconnect,
+and the board only drops replays that arrive inside its 1.5 s settle window
+(see [Commands](#commands-subscribe)), so retaining commands risks
+re-actuating relays from stale messages. The retained `/state` topics already
+give Home Assistant the current state on startup.
+
+---
+
 ## Known limitations
 
 - **Topics are global.** `relay/deviceN` carries no per-board segment, so two
@@ -213,3 +281,16 @@ mosquitto_sub -h broker.local -u user -P pass -t 'relay/#' -v
   of the retained-command settle window described above.
 - **PubSubClient publishes at QoS 0.** Subscriptions and the Last Will use
   QoS 1, but outbound state publishes are fire-and-forget.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Keep the MQTT contract in the `relays[]`
+table in the sketch, and update this README when topics, payloads or pins change.
+
+---
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
